@@ -62,29 +62,33 @@ h1, h2, h3 {
 """, unsafe_allow_html=True)
 
 
+# WELCOME SCREEN
 # ============================================================
-# LOGIN
-# ============================================================
 
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
+if "welcome_done" not in st.session_state:
+    st.session_state.welcome_done = False
 
+if not st.session_state.welcome_done:
 
-if not st.session_state.logged_in:
-
-    left, center, right = st.columns([1, 1.1, 1])
+    left, center, right = st.columns([1, 1.2, 1])
 
     with center:
 
         st.write("")
+        st.write("")
 
         try:
-            st.image("logo copy.png", width=110)
+            st.image("logo copy.png", width=220)
         except:
             pass
 
         st.markdown(
-            "<h1 style='text-align:center;'>PatternX</h1>",
+            "<h1 style='text-align:center;'>WELCOME!</h1>",
+            unsafe_allow_html=True
+        )
+
+        st.markdown(
+            "<h2 style='text-align:center;color:#17365D;'>PatternX</h2>",
             unsafe_allow_html=True
         )
 
@@ -97,36 +101,11 @@ if not st.session_state.logged_in:
 
         st.write("")
 
-        st.subheader("Admin Login")
-
-        username = st.text_input("Username")
-
-        password = st.text_input(
-            "Password",
-            type="password"
-        )
-
-        if st.button(
-            "Login",
-            use_container_width=True
-        ):
-
-            if (
-                username == "security_admin"
-                and password == "patternx123"
-            ):
-
-                st.session_state.logged_in = True
-                st.rerun()
-
-            else:
-
-                st.error(
-                    "Invalid username or password."
-                )
+        if st.button("Enter PatternX", use_container_width=True):
+            st.session_state.welcome_done = True
+            st.rerun()
 
     st.stop()
-
 
 # ============================================================
 # LOAD MODEL
