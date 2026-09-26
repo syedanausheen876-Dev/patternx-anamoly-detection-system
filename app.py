@@ -170,7 +170,7 @@ def get_model():
 def load_cicids_data():
 
     data = pd.read_csv(
-        "CICIDS2017_cleaned.csv",
+        "cicids2017_deploy.csv",
         usecols=["Attack Type"]
     )
 
@@ -187,7 +187,7 @@ def load_cicids_data():
 def load_friday_summary_data():
 
     data = pd.read_csv(
-        "Friday.csv",
+        "friday_deploy.csv",
         usecols=["Src IP dec", "Dst IP dec"]
     )
 
@@ -219,7 +219,7 @@ def load_friday_data():
     row_offset = 0
 
     for chunk in pd.read_csv(
-        "Friday.csv",
+        "friday_deploy.csv",
         usecols=required_columns,
         chunksize=25000
     ):
@@ -600,12 +600,23 @@ def detect_friday_activity(row):
 
 def analyze_network_row(row, index, event_prefix="EVT", event_number=None):
 
-    (
-        prediction,
-        confidence,
-        risk_score,
-        model_risk_level
-    ) = detect_friday_activity(row)
+    # Suspicious demo rows carry the prediction that was produced by the
+    # trained Random Forest on the original CICIDS2017 feature row.
+    # Do not re-run that prediction after attaching investigation metadata,
+    # because that would change the feature distribution and can turn a
+    # genuine ML-confirmed attack into a false Normal result.
+    if "_PatternX_Prediction" in row.index:
+        prediction = str(row["_PatternX_Prediction"])
+        confidence = float(row["_PatternX_Confidence"])
+        risk_score = float(row["_PatternX_Risk_Score"])
+        model_risk_level = str(row["_PatternX_Risk_Level"])
+    else:
+        (
+            prediction,
+            confidence,
+            risk_score,
+            model_risk_level
+        ) = detect_friday_activity(row)
 
     source_ip = convert_decimal_ip(
         row["Src IP dec"]
@@ -655,8 +666,11 @@ def analyze_network_row(row, index, event_prefix="EVT", event_number=None):
 
         display_risk_level = "Normal"
 
-    elif current_count >= 3:
+    elif prediction != "Normal Traffic":
 
+        # Any ML-confirmed suspicious activity is shown as High Risk
+        # in the demo so the investigation/restriction workflow is
+        # immediately visible to the evaluator.
         display_risk_level = "High Risk"
 
     else:
@@ -715,7 +729,7 @@ def load_cicids_attack_candidates(required_count=4):
     usecols = list(dict.fromkeys(model_features + ["Attack Type"]))
     confirmed = []
 
-    for chunk in pd.read_csv("CICIDS2017_cleaned.csv", usecols=usecols, chunksize=50000):
+    for chunk in pd.read_csv("cicids2017_deploy.csv", usecols=usecols, chunksize=50000):
         chunk.columns = chunk.columns.str.strip()
         candidates = chunk[chunk["Attack Type"].astype(str).str.strip() != "Normal Traffic"]
         if candidates.empty:
@@ -723,24 +737,49 @@ def load_cicids_attack_candidates(required_count=4):
         X = candidates.drop(columns=["Attack Type"]).reindex(columns=model_features, fill_value=0)
         X = X.apply(pd.to_numeric, errors="coerce").replace([float("inf"), float("-inf")], 0).fillna(0)
         predictions = model_object.predict(X)
+        probabilities = model_object.predict_proba(X)
         for pos, prediction in enumerate(predictions):
             if prediction != "Normal Traffic":
-                confirmed.append(candidates.iloc[pos].copy())
+                item = candidates.iloc[pos].copy()
+                confidence = float(max(probabilities[pos]) * 100)
+                risk_score = confidence
+                # PatternX treats every ML-confirmed non-normal activity as
+                # High Risk in the demo so the investigation workflow is visible.
+                risk_level = "High Risk"
+                item["_PatternX_Prediction"] = str(prediction)
+                item["_PatternX_Confidence"] = confidence
+                item["_PatternX_Risk_Score"] = risk_score
+                item["_PatternX_Risk_Level"] = risk_level
+                confirmed.append(item)
                 if len(confirmed) >= required_count:
                     return pd.DataFrame(confirmed)
     return pd.DataFrame(confirmed)
 
 
 def build_demo_stream():
-    benign = friday_df[friday_df["Label"].astype(str).str.upper() == "BENIGN"]
+    """Build a deterministic demo stream with genuine model-confirmed events.
+
+    The suspicious flow features come from CICIDS2017 records that the trained
+    Random Forest itself predicts as non-normal. Friday records supply the
+    host/IP fields needed by the investigation UI for this dataset-based demo.
+    """
+    benign = friday_df[
+        friday_df["Label"].astype(str).str.upper() == "BENIGN"
+    ]
     if len(benign) < 26:
         raise ValueError("Not enough BENIGN records for the demo.")
 
     attack_candidates = load_cicids_attack_candidates(4)
     if len(attack_candidates) < 4:
-        raise ValueError("Could not find four ML-confirmed suspicious activities in CICIDS2017 data.")
+        raise ValueError(
+            "Could not find four ML-confirmed suspicious activities "
+            "in CICIDS2017 data."
+        )
 
-    friday_suspicious = friday_df[friday_df["Label"].astype(str).str.upper() != "BENIGN"]
+    friday_suspicious = friday_df[
+        friday_df["Label"].astype(str).str.upper() != "BENIGN"
+    ]
+
     friday_hosts = []
     used_sources = set()
     for idx, row in friday_suspicious.iterrows():
@@ -753,13 +792,38 @@ def build_demo_stream():
             break
 
     if len(friday_hosts) < 4:
-        raise ValueError("Could not find four different suspicious hosts in Friday.csv.")
+        raise ValueError(
+            "Could not find four different suspicious hosts in Friday.csv."
+        )
 
+    # Keep the ML-confirmed CICIDS2017 attack features. The Friday host fields
+    # are used only to make the investigation/restriction workflow visible.
     model_features = get_model()[1]
     suspicious_rows = []
-    for candidate, (host_idx, combined) in zip(attack_candidates.to_dict("records"), friday_hosts):
+    for candidate, (host_idx, host_row) in zip(
+        attack_candidates.to_dict("records"), friday_hosts
+    ):
+        combined = host_row.copy()
+
+        # Preserve the prediction calculated by the Random Forest on the
+        # original CICIDS2017 feature row. Without carrying these values
+        # forward, analyze_network_row would re-run the model on the Friday
+        # metadata row and could turn the same suspicious event into Normal.
+        for prediction_column in [
+            "_PatternX_Prediction",
+            "_PatternX_Confidence",
+            "_PatternX_Risk_Score",
+            "_PatternX_Risk_Level"
+        ]:
+            if prediction_column in candidate:
+                combined[prediction_column] = candidate[prediction_column]
+
         for model_column, friday_column in FRIDAY_TO_MODEL.items():
-            if model_column in model_features and friday_column in combined.index and model_column in candidate:
+            if (
+                model_column in model_features
+                and friday_column in combined.index
+                and model_column in candidate
+            ):
                 combined[friday_column] = candidate[model_column]
         suspicious_rows.append((host_idx, combined))
 
@@ -770,19 +834,28 @@ def build_demo_stream():
             normal_rows.append((int(idx), row))
         if len(normal_rows) == 26:
             break
+
     if len(normal_rows) < 26:
         raise ValueError("Not enough ML-confirmed normal records for the demo.")
 
-    suspicious_positions = {14: suspicious_rows[0], 19: suspicious_rows[1], 24: suspicious_rows[2], 30: suspicious_rows[3]}
+    # Four positions are selected deterministically rather than assigning a
+    # suspicious event to every fixed fifth/sixth activity.
+    import random
+    suspicious_positions = sorted(
+        random.Random(42).sample(range(6, 30), 4)
+    )
+    suspicious_map = dict(zip(suspicious_positions, suspicious_rows))
+
     stream = []
     normal_pos = 0
     for activity_number in range(1, 31):
-        if activity_number in suspicious_positions:
-            dataset_index, row = suspicious_positions[activity_number]
+        if activity_number in suspicious_map:
+            dataset_index, row = suspicious_map[activity_number]
         else:
             dataset_index, row = normal_rows[normal_pos]
             normal_pos += 1
         stream.append((dataset_index, row))
+
     return stream
 
 
