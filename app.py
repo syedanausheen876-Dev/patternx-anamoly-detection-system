@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import joblib
 import plotly.express as px
+import io
+import zipfile
 from datetime import datetime, timedelta
 import ipaddress
 
@@ -132,17 +134,29 @@ if not st.session_state.logged_in:
 @st.cache_resource
 def load_model():
 
-    model = joblib.load(
-        "patternx_model.pkl"
-    )
+    try:
+        model = joblib.load("patternx_model.pkl")
+
+    except FileNotFoundError:
+        with zipfile.ZipFile("patternx_model.zip", "r") as z:
+            model_files = [
+                name for name in z.namelist()
+                if name.endswith(".pkl")
+            ]
+
+            if not model_files:
+                raise FileNotFoundError(
+                    "No .pkl model file found inside patternx_model.zip"
+                )
+
+            model_data = z.read(model_files[0])
+            model = joblib.load(io.BytesIO(model_data))
 
     features = joblib.load(
         "patternx_features.pkl"
     )
 
     return model, features
-
-
 # Model and datasets are loaded lazily.
 # This keeps the login and first dashboard load fast.
 model = None
